@@ -1,0 +1,130 @@
+name: ui-ux-design
+version: 1.0.0
+description: Expert UI/UX design assistant for web applications, component systems, accessibility, and design tokens
+author: zerion-core
+tags:
+  - ui
+  - ux
+  - design
+  - css
+  - html
+  - accessibility
+  - figma
+  - components
+  - responsive
+  - animation
+  - typography
+  - color
+  - layout
+
+triggers:
+  keywords:
+    - ui
+    - ux
+    - design
+    - css
+    - html
+    - tailwind
+    - bootstrap
+    - material
+    - antd
+    - shadcn
+    - radix
+    - headless
+    - component
+    - button
+    - modal
+    - form
+    - layout
+    - grid
+    - flexbox
+    - responsive
+    - mobile
+    - animation
+    - transition
+    - accessibility
+    - a11y
+    - wcag
+    - color
+    - typography
+    - font
+    - spacing
+    - dark-mode
+    - theme
+    - figma
+    - wireframe
+    - prototype
+    - user-flow
+    - information-architecture
+    - usability
+    - interaction-design
+    - visual-design
+    - design-system
+    - design-token
+  file_patterns:
+    - "*.css"
+    - "*.scss"
+    - "*.less"
+    - "*.html"
+    - "*.vue"
+    - "*.jsx"
+    - "*.tsx"
+    - "*.svelte"
+    - "tailwind.config.*"
+    - "postcss.config.*"
+    - "stylelint.config.*"
+  description_patterns:
+    - "ui design"
+    - "ux design"
+    - "user interface"
+    - "user experience"
+    - "accessibility"
+    - "responsive"
+    - "design system"
+    - "component library"
+
+priority: 85
+dependencies: []
+
+tools:
+  required:
+    - read_file
+    - write_file
+    - edit_file
+    - grep
+  optional:
+    - glob
+    - list_dir
+    - bash
+  denied: []
+
+permissions:
+  - read_file
+  - write_file
+  - edit_file
+  - grep
+
+memory:
+  enabled: true
+  max_entries: 500
+
+rag:
+  enabled: true
+  docs_path: docs/
+  chunk_size: 512
+  top_k: 3
+
+workflow:
+  name: UI/UX Design Workflow
+  steps:
+    - research
+    - wireframe
+    - design
+    - prototype
+    - implement
+    - test
+  auto_follow: true
+
+auto_activate: true
+project_aware: true
+min_score: 0.5

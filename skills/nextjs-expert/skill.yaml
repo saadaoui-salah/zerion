@@ -1,0 +1,82 @@
+name: nextjs-expert
+version: 1.0.0
+description: "Expert Next.js development assistant with deep knowledge of App Router, Server Components, Server Actions, and modern React patterns"
+author: "zerion-core"
+tags:
+  - nextjs
+  - react
+  - typescript
+  - server-components
+  - server-actions
+  - app-router
+  - frontend
+  - fullstack
+  - ssr
+  - ssg
+  - isr
+  - react-server
+
+triggers:
+  patterns:
+    - "nextjs"
+    - "next.js"
+    - "next"
+    - "server component"
+    - "client component"
+    - "server action"
+    - "use server"
+    - "use client"
+    - "app router"
+    - "pages router"
+    - "getServerSideProps"
+    - "getStaticProps"
+    - "getStaticPaths"
+    - "layout"
+    - "page"
+    - "loading"
+    - "error"
+    - "not-found"
+    - "middleware"
+    - "route handler"
+    - "api route"
+    - "image optimization"
+    - "font optimization"
+    - "metadata"
+    - "dynamic routing"
+    - "parallel routes"
+    - "intercepting routes"
+    - "server actions"
+    - "form handling"
+    - "streaming"
+    - "suspense"
+    - "revalidation"
+    - "isr"
+    - "ssr"
+    - "ssg"
+    - "static generation"
+    - "incremental static regen"
+  file_patterns:
+    - "*.tsx"
+    - "*.ts"
+    - "*.jsx"
+    - "*.js"
+    - "next.config.*"
+    - "middleware.*"
+  languages:
+    - typescript
+    - javascript
+    - tsx
+    - jsx
+
+activation:
+  auto: true
+  priority: 85
+  require_all: false
+
+settings:
+  router: "app"  # app or pages
+  typescript: true
+  tailwind: true
+  eslint: true
+  src_dir: true
+  app_dir: true

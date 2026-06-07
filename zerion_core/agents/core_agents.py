@@ -323,15 +323,188 @@ class ArchitectAgent(Agent):
             ),
         )
 
-    async def analyze(self, project: str) -> dict[str, Any]:
-        # Generate conventions
-        conventions = {
-            "js_extension": "tsx",
-            "css_strategy": "tailwind",
-            "state_management": "redux_toolkit",
-            "testing": "vitest"
-        }
+    async def analyze(self, project: str, workspace_scan: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Analyze the project and produce stack_conventions.json.
+
+        If workspace_scan is provided, conventions are derived from the actual
+        project files (extensions, package.json, requirements.txt, etc.).
+        Otherwise, falls back to LLM-based analysis or sensible defaults.
+        """
+        conventions = self._detect_conventions_from_scan(workspace_scan)
+
+        # If scan data is sparse, ask the LLM to fill in gaps
+        if not conventions.get("detected_from_files"):
+            conventions = await self._llm_analyze_conventions(project, workspace_scan, conventions)
+
+        # Ensure all required fields have defaults
+        conventions.setdefault("js_extension", "tsx")
+        conventions.setdefault("css_strategy", "tailwind")
+        conventions.setdefault("state_management", "redux_toolkit")
+        conventions.setdefault("testing", "vitest")
+        conventions.setdefault("linting", "eslint")
+        conventions.setdefault("formatting", "prettier")
+        conventions.setdefault("module_system", "esm")
+        conventions.setdefault("package_manager", "npm")
+        conventions.setdefault("python_version", "3.11+")
+        conventions.setdefault("type_checking", "typescript")
+        conventions.setdefault("path_style", "posix")
+
+        conventions["detected_from_files"] = conventions.get("detected_from_files", False)
+        conventions["confidence"] = conventions.get("confidence", 0.5)
+
         return {"project": project, "stack_conventions": conventions}
+
+    def _detect_conventions_from_scan(self, scan: dict[str, Any] | None) -> dict[str, Any]:
+        """Derive conventions from a workspace scan dict (dirs, files, technologies)."""
+        if not scan:
+            return {}
+
+        conventions: dict[str, Any] = {"detected_from_files": True, "confidence": 0.8}
+
+        files = scan.get("files", [])
+        dirs = scan.get("dirs", [])
+        technologies = scan.get("technologies", [])
+        tech_set = set(t.lower() for t in technologies)
+
+        # File extension analysis
+        ext_counts: dict[str, int] = {}
+        for f in files:
+            if isinstance(f, str):
+                ext = f.rsplit(".", 1)[-1] if "." in f else ""
+                ext_counts[ext] = ext_counts.get(ext, 0) + 1
+
+        # JS/TS extension detection
+        tsx_count = ext_counts.get("tsx", 0)
+        jsx_count = ext_counts.get("jsx", 0)
+        ts_count = ext_counts.get("ts", 0)
+        js_count = ext_counts.get("js", 0)
+
+        if tsx_count > jsx_count:
+            conventions["js_extension"] = "tsx"
+        elif jsx_count > 0:
+            conventions["js_extension"] = "jsx"
+        elif ts_count > js_count:
+            conventions["js_extension"] = "ts"
+        else:
+            conventions["js_extension"] = "js"
+
+        # CSS strategy detection
+        dir_set = set(d.lower() for d in dirs if isinstance(d, str))
+        if "tailwind" in " ".join(dir_set) or "tailwindcss" in tech_set:
+            conventions["css_strategy"] = "tailwind"
+        elif any("styled" in d or "emotion" in d for d in dir_set):
+            conventions["css_strategy"] = "css-in-js"
+        elif ext_counts.get("scss", 0) > ext_counts.get("css", 0):
+            conventions["css_strategy"] = "scss"
+        else:
+            conventions["css_strategy"] = "css"
+
+        # State management
+        if "redux" in tech_set or "redux_toolkit" in tech_set or "reduxjs" in tech_set:
+            conventions["state_management"] = "redux_toolkit"
+        elif "zustand" in tech_set:
+            conventions["state_management"] = "zustand"
+        elif "jotai" in tech_set:
+            conventions["state_management"] = "jotai"
+        elif "mobx" in tech_set:
+            conventions["state_management"] = "mobx"
+        elif "pinia" in tech_set or "vuex" in tech_set:
+            conventions["state_management"] = "pinia"
+        else:
+            conventions["state_management"] = "none"
+
+        # Testing framework
+        if "vitest" in tech_set or "vitest" in dir_set:
+            conventions["testing"] = "vitest"
+        elif "jest" in tech_set:
+            conventions["testing"] = "jest"
+        elif "pytest" in tech_set or "unittest" in tech_set:
+            conventions["testing"] = "pytest"
+        elif "mocha" in tech_set:
+            conventions["testing"] = "mocha"
+        else:
+            conventions["testing"] = "none"
+
+        # Package manager
+        if "pnpm" in tech_set or any("pnpm" in str(f).lower() for f in files):
+            conventions["package_manager"] = "pnpm"
+        elif "yarn" in tech_set or any("yarn.lock" in str(f).lower() for f in files):
+            conventions["package_manager"] = "yarn"
+        elif "bun" in tech_set:
+            conventions["package_manager"] = "bun"
+        else:
+            conventions["package_manager"] = "npm"
+
+        # Python detection
+        py_count = ext_counts.get("py", 0)
+        if py_count > 0 or "python" in tech_set:
+            conventions["python_version"] = "3.11+"
+            conventions["type_checking"] = "mypy" if "mypy" in tech_set else "pyright" if "pyright" in tech_set else "pyright"
+            conventions["testing"] = "pytest" if py_count > 0 else conventions.get("testing", "pytest")
+
+        # Module system
+        if "esm" in tech_set or any("type" in str(f).lower() and "module" in str(f).lower() for f in files):
+            conventions["module_system"] = "esm"
+        elif "commonjs" in tech_set:
+            conventions["module_system"] = "commonjs"
+
+        # Linting/formatting
+        if "biome" in tech_set:
+            conventions["linting"] = "biome"
+            conventions["formatting"] = "biome"
+        else:
+            conventions["linting"] = "eslint"
+            conventions["formatting"] = "prettier"
+
+        return conventions
+
+    async def _llm_analyze_conventions(
+        self,
+        project: str,
+        scan: dict[str, Any] | None,
+        existing: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Ask the LLM to analyze conventions when scan data is insufficient."""
+        scan_summary = ""
+        if scan:
+            scan_summary = (
+                f"Technologies: {', '.join(scan.get('technologies', [])[:20])}\n"
+                f"Files: {scan.get('file_count', 0)} source files\n"
+                f"Directories: {', '.join(scan.get('dirs', [])[:30])}\n"
+            )
+
+        prompt = (
+            f"Analyze this project and return stack_conventions.json:\n\n"
+            f"Project: {project}\n{scan_summary}\n"
+            f"Existing partial detection: {json.dumps(existing, indent=2)}\n\n"
+            f"Return JSON with these fields:\n"
+            f'{{"js_extension": "tsx|ts|jsx|js", '
+            f'"css_strategy": "tailwind|scss|css-in-js|css", '
+            f'"state_management": "redux_toolkit|zustand|jotai|mobx|pinia|none", '
+            f'"testing": "vitest|jest|pytest|mocha|none", '
+            f'"linting": "eslint|biome", '
+            f'"formatting": "prettier|biome", '
+            f'"module_system": "esm|commonjs", '
+            f'"package_manager": "npm|pnpm|yarn|bun", '
+            f'"python_version": "3.11+", '
+            f'"type_checking": "typescript|pyright|mypy|none", '
+            f'"detected_from_files": true, '
+            f'"confidence": 0.0-1.0}}'
+        )
+
+        try:
+            resp = await self.llm.chat(
+                messages=[{"role": "user", "content": prompt}],
+                model=ModelRouter.for_task("architecture"),
+                system=self.system_prompt,
+                json_mode=True,
+                temperature=0.0,
+            )
+            result = json.loads(resp.content)
+            result["detected_from_files"] = True
+            return result
+        except (json.JSONDecodeError, Exception):
+            return existing
 
 
 class IntegratorAgent(Agent):

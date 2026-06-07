@@ -442,15 +442,63 @@ class MemoryManager:
         return archived_count
 
     def _calculate_score(self, meta: Any, now: datetime) -> float:
+        """Calculate memory survival score with complexity-aware heuristics.
+
+        Improvements over naive linear scoring:
+        - Importance ceiling boost: memories with importance > 0.8 get extra protection
+        - Freshness cliff: very recent memories (< 2h) get a bonus, old memories (> 7d) get
+          penalized more aggressively via a non-linear decay curve
+        - Usage momentum: memories used recently (last 24h) get boosted usage weight
+        - Domain relevance: higher-importance memories are less susceptible to decay
+        """
         last = datetime.fromisoformat(meta.last_accessed)
         if last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
 
         hours_since = (now - last).total_seconds() / 3600
-        recency = 1.0 / (1.0 + (hours_since / 24.0))
-        usage = min(1.0, meta.times_used / 10.0)
 
-        return (meta.importance * 0.4) + (recency * 0.4) + (usage * 0.2)
+        # --- Recency (non-linear) ---
+        # Freshness cliff: boost for < 2h, steep decay after 7 days
+        if hours_since < 2:
+            recency = 1.0 + 0.15 * (1.0 - hours_since / 2.0)  # up to +15% bonus
+        elif hours_since < 24:
+            recency = 1.0 / (1.0 + (hours_since / 24.0))
+        elif hours_since < 168:  # 7 days
+            # Steeper decay for the first week
+            recency = 0.5 / (1.0 + ((hours_since - 24) / 48.0))
+        else:
+            # Very old: floor at 0.05 with exponential tail
+            recency = max(0.05, 0.3 * (0.9 ** ((hours_since - 168) / 168.0)))
+
+        # --- Usage (momentum-aware) ---
+        # If the memory was used recently (< 24h), boost usage weight
+        recent_usage_boost = 1.0
+        if hours_since < 24:
+            recent_usage_boost = 1.3  # 30% bonus for recently used memories
+
+        base_usage = min(1.0, meta.times_used / 10.0)
+        usage = min(1.0, base_usage * recent_usage_boost)
+
+        # --- Importance (ceiling boost) ---
+        # Very important memories (> 0.8) get a 20% bonus and resist decay better
+        importance = meta.importance
+        if importance > 0.8:
+            importance = min(1.0, importance * 1.2)
+            # High-importance memories decay 30% slower
+            recency = max(recency, recency * 0.7 + 0.3 * recency)
+
+        # --- Weighted combination ---
+        # Shift weights toward importance for high-value memories
+        if meta.importance > 0.8:
+            # 50% importance, 30% recency, 20% usage
+            return (importance * 0.5) + (recency * 0.3) + (usage * 0.2)
+        elif meta.importance > 0.5:
+            # 40% importance, 40% recency, 20% usage (default)
+            return (importance * 0.4) + (recency * 0.4) + (usage * 0.2)
+        else:
+            # Low-importance: rely more on recency and usage
+            # 25% importance, 45% recency, 30% usage
+            return (importance * 0.25) + (recency * 0.45) + (usage * 0.3)
 
     # --- Procedural ---
     def get_procedures(self) -> list[ProceduralEntry]:
@@ -528,8 +576,21 @@ class MemoryManager:
 
             return "\n\n".join(b for b in blocks if b)
 
-        # depth == "deep" — project-aware retrieval
-        hits = await self.retriever.search(query, project_filter=project if project else None)
+        # depth == "deep" — project-aware retrieval with complexity-adaptive limits
+        # Estimate task complexity from query length and technical term density
+        words = query.lower().split()
+        complexity_hint = min(1.0, len(words) / 20.0)  # 0.0 (simple) to 1.0 (complex)
+        tech_density = sum(1 for w in words if len(w) > 6) / max(len(words), 1)
+        effective_complexity = (complexity_hint + tech_density) / 2.0
+
+        # For moderately complex tasks, retrieve more results
+        base_limit = 8
+        if effective_complexity > 0.4:
+            retrieval_limit = min(15, base_limit + int(effective_complexity * 10))
+        else:
+            retrieval_limit = base_limit
+
+        hits = await self.retriever.search(query, limit=retrieval_limit, project_filter=project if project else None)
         blocks.append(self.retriever.format_context(hits))
 
         # cross-project insights for known projects

@@ -214,6 +214,28 @@ class Agent:
         self.state.current_task = ""
         return answer
 
+    def emit_todo(self, action: str, text: str = "", items: list[str] | None = None) -> None:
+        """Emit a todo event to the UI via logger."""
+        if self.logger:
+            if action == "set" and items:
+                for item in items:
+                    self.logger(f"TODO_SET:{item}")
+            elif action == "done":
+                self.logger(f"TODO_DONE:{text}")
+            elif action == "add":
+                self.logger(f"TODO_ADD:{text}")
+
+    async def emit_todo_async(self, action: str, text: str = "", items: list[str] | None = None) -> None:
+        """Emit a todo event asynchronously via the bus."""
+        await self.bus.publish(
+            AgentMessage(
+                from_agent=self.name,
+                to_agent="*",
+                task=f"todo_{action}",
+                payload={"text": text, "items": items or []},
+            )
+        )
+
     def status_line(self) -> str:
         indicator = {"Idle": "○", "Working": "●", "Waiting": "◐", "Error": "✗"}
         sym = indicator.get(self.state.status.value, "○")

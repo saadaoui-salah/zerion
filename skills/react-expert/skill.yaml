@@ -1,0 +1,75 @@
+name: react-expert
+version: 1.0.0
+description: "Expert React development assistant with deep knowledge of hooks, state management, performance optimization, and modern patterns"
+author: "zerion-core"
+tags:
+  - react
+  - javascript
+  - typescript
+  - hooks
+  - state-management
+  - performance
+  - frontend
+  - spa
+  - jsx
+  - components
+  - redux
+  - zustand
+  - react-query
+
+triggers:
+  patterns:
+    - "react"
+    - "jsx"
+    - "tsx"
+    - "hooks"
+    - "useState"
+    - "useEffect"
+    - "useContext"
+    - "useReducer"
+    - "useMemo"
+    - "useCallback"
+    - "useRef"
+    - "component"
+    - "props"
+    - "state"
+    - "context"
+    - "redux"
+    - "zustand"
+    - "react-query"
+    - "tanstack"
+    - "router"
+    - "react-router"
+    - "vite"
+    - "cra"
+    - "create-react-app"
+    - "performance"
+    - "re-render"
+    - "memo"
+    - "lazy"
+    - "suspense"
+    - "error-boundary"
+  file_patterns:
+    - "*.tsx"
+    - "*.jsx"
+    - "*.ts"
+    - "*.js"
+    - "vite.config.*"
+    - "package.json"
+  languages:
+    - typescript
+    - javascript
+    - tsx
+    - jsx
+
+activation:
+  auto: true
+  priority: 80
+  require_all: false
+
+settings:
+  framework: "react"
+  typescript: true
+  bundler: "vite"  # vite, webpack, esbuild
+  state_management: "zustand"  # zustand, redux, context
+  styling: "tailwind"  # tailwind, css-modules, styled-components

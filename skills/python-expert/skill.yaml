@@ -1,0 +1,78 @@
+name: python-expert
+version: 1.0.0
+description: Expert Python development assistant with deep knowledge of best practices, patterns, and performance optimization
+author: zerion-core
+tags:
+  - python
+  - programming
+  - best-practices
+  - performance
+  - debugging
+
+triggers:
+  keywords:
+    - python
+    - py
+    - django
+    - flask
+    - fastapi
+    - asyncio
+    - type-hint
+    - pip
+    - poetry
+  file_patterns:
+    - "*.py"
+    - "requirements*.txt"
+    - "pyproject.toml"
+    - "setup.py"
+  description_patterns:
+    - "python"
+    - "pip"
+    - "virtualenv"
+
+priority: 80
+dependencies: []
+
+tools:
+  required:
+    - read_file
+    - write_file
+    - edit_file
+    - grep
+    - bash
+  optional:
+    - glob
+    - list_dir
+  denied: []
+
+permissions:
+  - read_file
+  - write_file
+  - edit_file
+  - grep
+  - bash
+
+memory:
+  enabled: true
+  max_entries: 500
+
+rag:
+  enabled: true
+  docs_path: docs/
+  chunk_size: 512
+  top_k: 3
+
+workflow:
+  name: Python Development Workflow
+  steps:
+    - inspect
+    - analyze
+    - plan
+    - implement
+    - test
+    - verify
+  auto_follow: true
+
+auto_activate: true
+project_aware: true
+min_score: 0.5

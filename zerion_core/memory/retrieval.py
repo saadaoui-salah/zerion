@@ -102,9 +102,54 @@ class HybridRetriever:
         keyword_weight: float = 0.2,
         project_filter: str | None = None,
     ) -> list[RetrievalHit]:
+        """Search across vector, graph, and keyword stores with adaptive scoring.
+
+        Adaptivity for moderately complex tasks:
+        - Longer/more specific queries increase keyword weight (exact matches matter)
+        - Queries with tech terms increase graph weight (structured knowledge is valuable)
+        - Short/vague queries increase vector weight (semantic similarity is more useful)
+        """
         hits: dict[str, RetrievalHit] = {}
 
         q_lower = query.lower()
+        words = q_lower.split()
+
+        # --- Adaptive weight adjustment based on query characteristics ---
+        adapted_vector = vector_weight
+        adapted_graph = graph_weight
+        adapted_keyword = keyword_weight
+
+        # Longer queries (> 4 words) signal specificity → boost keyword matching
+        if len(words) > 4:
+            adapted_keyword += 0.1
+            adapted_vector -= 0.05
+            adapted_graph -= 0.05
+
+        # Queries with technical terms → boost graph (structured knowledge)
+        tech_terms = {
+            "api", "database", "auth", "deploy", "test", "config", "schema",
+            "endpoint", "middleware", "component", "service", "handler",
+            "class", "function", "module", "package", "dependency",
+        }
+        tech_overlap = set(words) & tech_terms
+        if tech_overlap:
+            boost = min(0.15, len(tech_overlap) * 0.05)
+            adapted_graph += boost
+            adapted_vector -= boost / 2
+            adapted_keyword -= boost / 2
+
+        # Very short queries (1-2 words) → boost vector (semantic is better for vague)
+        if len(words) <= 2:
+            adapted_vector += 0.1
+            adapted_keyword -= 0.05
+            adapted_graph -= 0.05
+
+        # Normalize weights to sum to 1.0
+        total = adapted_vector + adapted_graph + adapted_keyword
+        if total > 0:
+            adapted_vector /= total
+            adapted_graph /= total
+            adapted_keyword /= total
 
         # Vector search (with optional project filter)
         try:
@@ -122,7 +167,7 @@ class HybridRetriever:
                     results["distances"][0] if results["distances"] else [0.5] * len(results["documents"][0]),
                 ):
                     key = self._doc_id(doc, meta.get("source", "vector"))
-                    score = max(0.0, 1.0 - float(dist)) * vector_weight
+                    score = max(0.0, 1.0 - float(dist)) * adapted_vector
                     hits[key] = RetrievalHit(
                         content=doc,
                         source=meta.get("source", "vector"),
@@ -132,12 +177,32 @@ class HybridRetriever:
         except Exception:
             pass
 
-        # Graph search
+        # Graph search — with recency-aware scoring
         for item in self.graph.search_keyword(query):
             key = f"graph:{item['id']}"
-            score = graph_weight
+            score = adapted_graph
+
+            # Recency bonus: graph entries with recent timestamps score higher
+            attrs = item.get("attrs", {})
+            ts = attrs.get("timestamp") or attrs.get("updated_at")
+            if ts:
+                try:
+                    from datetime import datetime, timezone
+                    entry_time = datetime.fromisoformat(str(ts))
+                    if entry_time.tzinfo is None:
+                        entry_time = entry_time.replace(tzinfo=timezone.utc)
+                    hours_old = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+                    if hours_old < 24:
+                        score *= 1.2  # 20% bonus for very recent graph entries
+                    elif hours_old < 168:  # 7 days
+                        score *= 1.0 + 0.1 * max(0, 1.0 - hours_old / 168.0)
+                except (ValueError, TypeError):
+                    pass
+
+            # Cross-project penalty
             if project_filter and project_filter not in key and project_filter not in json.dumps(item["attrs"]):
                 score *= 0.3
+
             hits[key] = RetrievalHit(
                 content=json.dumps(item["attrs"]),
                 source=f"graph:{item['id']}",
@@ -152,9 +217,11 @@ class HybridRetriever:
             if project_filter and entry_project and entry_project != project_filter:
                 continue
             if q_lower in text.lower():
-                words = q_lower.split()
                 matches = sum(1 for w in words if w in text.lower())
-                score = (matches / max(len(words), 1)) * keyword_weight
+                # Use adapted keyword weight and boost for high match ratios
+                match_ratio = matches / max(len(words), 1)
+                # Bonus for matching more words (superlinear)
+                score = (match_ratio ** 0.8) * adapted_keyword
                 key = f"kw:{doc_id}"
                 if key not in hits or hits[key].score < score:
                     hits[key] = RetrievalHit(

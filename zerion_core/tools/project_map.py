@@ -12,8 +12,7 @@ from zerion_core.config import settings
 
 SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
-    "chroma", ".pytest_cache", ".mypy_cache", "egg-info", ".agent_bus",
-    ".memory", ".cursor", ".idea",
+    "chroma", ".pytest_cache", ".mypy_cache", "egg-info", ".zerion", ".cursor", ".idea",
 })
 
 SKIP_EXT = frozenset({

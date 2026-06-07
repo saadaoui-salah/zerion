@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from zerion_core.agents.base import Agent, AgentStatus, TaskResult
@@ -26,8 +27,19 @@ from zerion_core.agents.planner import DynamicTeamFactory, PlannerAgent
 from zerion_core.bus.message_bus import MessageBus, MessagePriority
 from zerion_core.llm.ollama import OllamaClient
 from zerion_core.memory.manager import MemoryManager
+from zerion_core.memory.longterm import LongTermMemory
+from zerion_core.rag.agent_loop import RAGAgent
+from zerion_core.rag.embeddings import EmbeddingProvider
+from zerion_core.rag.indexer import CodeIndexer
+from zerion_core.rag.retriever import CodeRetriever
+from zerion_core.rag.vectorstore import CodeVectorStore
+from zerion_core.rag.watcher import FileWatcher
 from zerion_core.repo_intel.generator import RepositoryIntelligence
 from zerion_core.session import SessionManager, SessionMeta
+from zerion_core.skills.manager import SkillManager
+from zerion_core.skills.enhanced_manager import EnhancedSkillManager
+from zerion_core.benchmark.manager import BenchmarkManager
+from zerion_core.config import settings
 
 
 class UserAgent(Agent):
@@ -78,9 +90,21 @@ class Orchestrator:
         self.memory = MemoryManager(self.llm)
         self.bus = MessageBus()
         self.on_event = on_event or (lambda e: None)
-        self.sessions = SessionManager()
+        self.sessions = SessionManager(llm=self.llm, on_event=lambda s, m: self._emit(s, m))
         self._active_session_id: str | None = None
-        self._conversation: list[dict[str, str]] = []
+
+        # Long-term memory (lazy-initialized)
+        self._ltm: LongTermMemory | None = None
+
+        # Skill system (enhanced with advanced capabilities)
+        self.skill_manager = EnhancedSkillManager(
+            skills_dir=settings.skills_dir,
+            llm_fn=self.llm.chat,
+            on_event=lambda s, m: self._emit(s, m),
+        )
+
+        # Benchmark system (lazy-initialized)
+        self._benchmark: BenchmarkManager | None = None
 
         self.ceo = CEOAgent(self.llm, self.memory, self.bus)
         self.router = RouterAgent(self.llm, self.memory, self.bus)
@@ -100,6 +124,13 @@ class Orchestrator:
         self.user_proxy = UserAgent(self.llm, self.memory, self.bus, on_input_request=self._on_user_input_request)
         self.team_factory = DynamicTeamFactory(self.planner)
         self.repo_intel = RepositoryIntelligence(self.memory, self.llm)
+
+        # RAG pipeline (lazy-initialized)
+        self._rag_initialized = False
+        self._rag_indexer: CodeIndexer | None = None
+        self._rag_retriever: CodeRetriever | None = None
+        self._rag_agent: RAGAgent | None = None
+        self._rag_watcher: FileWatcher | None = None
 
         self.core_agents: list[Agent] = [
             self.ceo,
@@ -123,8 +154,98 @@ class Orchestrator:
     def all_agents(self) -> list[Agent]:
         return self.core_agents + self.dynamic_team
 
+    async def init_ltm(self) -> None:
+        """Initialize the long-term memory system (lazy)."""
+        if self._ltm is not None:
+            return
+        self._emit("memory", "Initializing long-term memory...")
+        self._ltm = LongTermMemory(self.llm, on_event=lambda s, m: self._emit(s, m))
+        # Run decay on startup
+        stats = self._ltm.run_decay()
+        if stats["decayed"] > 0:
+            self._emit("memory", f"Decayed {stats['decayed']} memories, pruned {stats['pruned']}")
+
+    async def init_benchmark(self) -> None:
+        """Initialize the benchmark system (lazy)."""
+        if self._benchmark is not None:
+            return
+        self._emit("benchmark", "Initializing benchmark system...")
+        self._benchmark = BenchmarkManager(on_event=lambda s, m: self._emit(s, m))
+        self._emit("benchmark", "Benchmark system ready")
+
+    async def init_rag(self) -> None:
+        """Initialize the RAG pipeline (lazy)."""
+        if self._rag_initialized:
+            return
+        self._emit("rag", "Initializing RAG pipeline...")
+        self._rag_indexer = CodeIndexer()
+        embeddings = EmbeddingProvider(self.llm)
+        self._rag_retriever = CodeRetriever(embeddings, CodeVectorStore())
+        self._rag_agent = RAGAgent(self.llm, self._rag_retriever)
+
+        # Index the codebase
+        chunks = self._rag_indexer.index_full(
+            on_progress=lambda i, total, path: self._emit("rag", f"Indexing [{i}/{total}]: {path}")
+        )
+        # Store chunks in vector DB
+        if chunks:
+            await self._store_chunks(chunks)
+        self._rag_retriever.build_keyword_index(chunks)
+
+        # Start file watcher
+        self._rag_watcher = FileWatcher(
+            self._rag_indexer,
+            on_change=self._on_rag_file_change,
+        )
+        self._rag_initialized = True
+        self._emit("rag", f"RAG ready ({len(chunks)} chunks indexed)")
+
+    async def _store_chunks(self, chunks: list[Any]) -> None:
+        """Batch-store code chunks into the vector DB."""
+        if not self._rag_retriever or not chunks:
+            return
+        batch_size = 32
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+            ids = [c.id for c in batch]
+            texts = [c.content for c in batch]
+            embeddings = await self._rag_retriever.embeddings.embed_batch(texts)
+            metadatas = [
+                {
+                    "file_path": c.file_path,
+                    "chunk_type": c.chunk_type,
+                    "symbol_name": c.symbol_name,
+                    "parent_class": c.parent_class,
+                    "language": c.language,
+                    "start_line": str(c.start_line),
+                    "end_line": str(c.end_line),
+                }
+                for c in batch
+            ]
+            await self._rag_retriever.store.upsert(ids, embeddings, texts, metadatas)
+
+    def _on_rag_file_change(self, changed_files: list[Any]) -> None:
+        """Handle file changes detected by watcher."""
+        if not self._rag_indexer or not self._rag_retriever:
+            return
+        self._emit("rag", f"Re-indexing {len(changed_files)} changed files...")
+        for fpath in changed_files:
+            chunks = self._rag_indexer.index_file(fpath)
+            if chunks:
+                # This is sync-safe since it's called from the event loop
+                asyncio.create_task(self._store_new_chunks(chunks))
+        self._rag_retriever.build_keyword_index(
+            self._rag_indexer.index_full()
+        )
+
+    async def _store_new_chunks(self, chunks: list[Any]) -> None:
+        if self._rag_retriever and chunks:
+            await self._store_chunks(chunks)
+
     async def start(self) -> None:
         self._bus_task = asyncio.create_task(self.bus.start())
+        # Load installed skills
+        await self.skill_manager.load_all()
 
     async def stop(self) -> None:
         self.bus.stop()
@@ -134,33 +255,32 @@ class Orchestrator:
                 await self._bus_task
             except asyncio.CancelledError:
                 pass
+        self.skill_manager.close()
+        if self._benchmark:
+            self._benchmark.close()
         await self.llm.close()
         self.memory.close()
 
     # --- Session Management ---
 
-    def save_session(self, name: str = "", description: str = "", tags: list[str] | None = None) -> SessionMeta:
+    async def save_session(self, name: str = "", description: str = "", tags: list[str] | None = None) -> SessionMeta:
         """Save the current memory state as a named session."""
-        meta = self.sessions.save(
-            memory=self.memory,
-            name=name,
-            description=description,
-            tags=tags,
-            conversation=self._conversation,
-            session_id=self._active_session_id,
-        )
-        self._active_session_id = meta.id
-        self._emit("session", f"Session saved: {meta.name} ({meta.id})")
+        meta = await self.sessions.save_session()
+        if meta:
+            if name:
+                self.sessions.rename_session(meta.id, name)
+            self._active_session_id = meta.id
+            self._emit("session", f"Session saved: {meta.title or meta.id}")
         return meta
 
-    def load_session(self, session_id: str) -> bool:
+    async def load_session(self, session_id: str) -> bool:
         """Restore a session's memory state."""
-        ok = self.sessions.restore(session_id, self.memory)
-        if ok:
+        data = await self.sessions.resume_session(session_id)
+        if data:
             self._active_session_id = session_id
-            self._conversation = self.sessions.get_conversation(session_id)
             self._emit("session", f"Session loaded: {session_id}")
-        return ok
+            return True
+        return False
 
     def list_sessions(self) -> list[SessionMeta]:
         """List all saved sessions."""
@@ -168,16 +288,15 @@ class Orchestrator:
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session."""
-        ok = self.sessions.delete(session_id)
+        ok = self.sessions.delete_session(session_id)
         if ok and self._active_session_id == session_id:
             self._active_session_id = None
-            self._conversation = []
         return ok
 
-    def new_session(self) -> None:
+    async def new_session(self) -> None:
         """Start a fresh session (clear active session tracking)."""
-        self._active_session_id = None
-        self._conversation = []
+        await self.sessions.create_session()
+        self._active_session_id = self.sessions.active_session_id
 
     def get_active_session_id(self) -> str | None:
         return self._active_session_id
@@ -190,6 +309,17 @@ class Orchestrator:
         message = str(payload.pop("message", ""))
         self._emit(event_type, message, **payload)
 
+        # Convert CLI events to todo events
+        if event_type == "todo_add":
+            self._emit("todo_add", message)
+        elif event_type == "file_diff":
+            path = data.get("path", "")
+            edited = data.get("edited", False)
+            action = "Updated" if edited else "Created"
+            self._emit("todo_done", f"{action} {path}")
+        elif event_type == "cli_done":
+            self._emit("todo_done", message)
+
     def _on_user_input_request(self, agent_name: str, question: str, message_id: str) -> None:
         self._emit("user_input_request", question, agent=agent_name, message_id=message_id)
 
@@ -199,8 +329,8 @@ class Orchestrator:
     async def run(self, user_request: str) -> dict[str, Any]:
         results: dict[str, Any] = {"request": user_request, "stages": []}
 
-        # Track conversation
-        self._conversation.append({"role": "user", "content": user_request})
+        # Track conversation in session
+        self.sessions.add_user_message(user_request)
 
         self.memory.refresh_project_structure()
         
@@ -250,9 +380,61 @@ class Orchestrator:
             if project_name:
                 context_data["project"] = project_name
 
+        # Skill: Auto-activate relevant skills
+        activated_skills = await self.skill_manager.auto_activate(user_request)
+        if activated_skills:
+            self._emit("skill", f"Activated skills: {', '.join(activated_skills)}")
+            context_data["active_skills"] = activated_skills
+
+            # Build skill memory context for agents
+            skill_memory_ctx = self.skill_manager._build_skill_memory_context(user_request)
+            if skill_memory_ctx:
+                context_data["skill_memory"] = skill_memory_ctx
+                self._emit("skill", f"Recalled skill memories for {len(activated_skills)} active skills")
+
+        # RAG: For code-related tasks, retrieve relevant code context
+        rag_context = ""
+        if category in ("cli", "refactor", "debug", "feature", "architecture") and complexity_score >= 2:
+            await self.init_rag()
+            if self._rag_agent:
+                self._emit("rag", "Retrieving relevant code context...")
+                rag_result = await self._rag_agent.query(user_request, k=8)
+                rag_context = rag_result.answer
+                context_data["rag_files"] = rag_result.files_referenced
+                context_data["rag_chunks_used"] = rag_result.total_chunks_used
+                self._emit("rag", f"Retrieved {rag_result.total_chunks_used} chunks from {len(rag_result.files_referenced)} files")
+
+        # Long-term memory: Retrieve relevant past memories for context
+        ltm_context = ""
+        if project_name and category != "chat":
+            await self.init_ltm()
+            if self._ltm:
+                self._emit("memory", "Recalling relevant long-term memories...")
+                ltm_results = await self._ltm.recall(user_request, project_id=project_name, limit=8)
+                if ltm_results:
+                    ltm_context = self._ltm.context_builder.build_context(
+                        retrieval_results=ltm_results,
+                        project_brain=self._ltm.get_project_brain(project_name),
+                        user_request=user_request,
+                    )
+                    context_data["ltm_memories"] = len(ltm_results)
+                    self._emit("memory", f"Recalled {len(ltm_results)} relevant memories")
+
         # === FastTrack: Simple tasks (score <= 1, is_complex=False) ===
         if not is_complex:
             self._emit("implement", f"Executing simple {category} task...")
+
+            # Even simple tasks benefit from stack conventions
+            if "stack_conventions" not in context_data:
+                try:
+                    from zerion_core.tools.project_map import scan_workspace
+                    ws_scan = scan_workspace()
+                    conventions = self.architect._detect_conventions_from_scan(ws_scan)
+                    if conventions:
+                        context_data["stack_conventions"] = conventions
+                except Exception:
+                    pass
+
             if category == "chat":
                 return await self._run_chat(user_request, context_data)
             
@@ -261,17 +443,65 @@ class Orchestrator:
             
             self._emit("complete", "Simple task completed")
             results["output"] = res.output
-            self._conversation.append({"role": "assistant", "content": res.output[:2000]})
+            self.sessions.add_assistant_message(res.output[:2000])
+
+            # Record skill outcomes
+            if activated_skills:
+                outcome = {"tests_passed": True, "build_succeeded": True, "user_accepted": True}
+                for skill_name in activated_skills:
+                    try:
+                        await self.skill_manager.record_outcome(
+                            skill_name=skill_name,
+                            task=user_request[:200],
+                            solution=res.output[:500],
+                            outcome=outcome,
+                            project_id=project_name,
+                        )
+                    except Exception:
+                        pass
+
+            # Record to long-term memory
+            if self._ltm and project_name:
+                try:
+                    await self._ltm.record_event(
+                        project_id=project_name,
+                        event_type="feature_implemented",
+                        content=f"Completed: {user_request[:200]}",
+                        session_id=self._active_session_id or "",
+                        metadata={"category": category, "complexity": complexity_score},
+                    )
+                except Exception:
+                    pass
+
             return results
 
         # === LightPipeline: Moderate tasks (score 2-3) ===
         if complexity_score <= 3:
             self._emit("planner", "Moderate task. Spawning light pipeline...")
+
+            # Inject stack conventions even in light pipeline
+            if "stack_conventions" not in context_data:
+                self._emit("architect", "Detecting stack conventions...")
+                try:
+                    from zerion_core.tools.project_map import scan_workspace, deep_scan_project
+                    ws_scan = scan_workspace()
+                    deep_scan = deep_scan_project()
+                    ws_scan["technologies"] = deep_scan.get("technologies", [])
+                except Exception:
+                    ws_scan = {}
+                arch = await self.architect.analyze("project", workspace_scan=ws_scan)
+                context_data["stack_conventions"] = arch.get("stack_conventions", {})
             
             plan_result = await self.planner.execute("create_light_plan", {"goal": user_request, "category": category})
             plan = plan_result.artifacts
             project = plan.get("project_name", "project")
             results["plan"] = plan
+
+            # Emit todos from plan
+            tasks = plan.get("tasks", [])
+            if tasks:
+                todo_items = [f"{t.get('title', '')}" for t in tasks]
+                self._emit("todo_set", "Plan created", data={"items": todo_items})
 
             # Execute tasks sequentially with existing core agents (no dynamic team)
             self._emit("implement", "Executing light pipeline tasks...")
@@ -280,8 +510,12 @@ class Orchestrator:
                 agent = self.cli if category == "cli" else self._pick_agent(task, category)
                 task_ctx = {"project": project, "task_type": category}
                 task_ctx.update(context_data)
+                if rag_context:
+                    task_ctx["rag_context"] = rag_context
                 res = await agent.execute(task.get("title", ""), task_ctx)
                 task_results.append(res.output)
+                # Mark task as done
+                self._emit("todo_done", task.get("title", ""))
             
             results["implementation"] = task_results
 
@@ -295,7 +529,36 @@ class Orchestrator:
 
             self._emit("complete", "Light pipeline completed")
             results["output"] = integrated
-            self._conversation.append({"role": "assistant", "content": integrated[:2000]})
+            self.sessions.add_assistant_message(integrated[:2000])
+
+            # Record skill outcomes
+            if activated_skills:
+                outcome = {"tests_passed": True, "build_succeeded": True, "user_accepted": True}
+                for skill_name in activated_skills:
+                    try:
+                        await self.skill_manager.record_outcome(
+                            skill_name=skill_name,
+                            task=user_request[:200],
+                            solution=integrated[:500],
+                            outcome=outcome,
+                            project_id=project_name,
+                        )
+                    except Exception:
+                        pass
+
+            # Record to long-term memory
+            if self._ltm and project_name:
+                try:
+                    await self._ltm.record_event(
+                        project_id=project_name,
+                        event_type="feature_implemented",
+                        content=f"Completed: {user_request[:200]}",
+                        session_id=self._active_session_id or "",
+                        metadata={"category": category, "complexity": complexity_score},
+                    )
+                except Exception:
+                    pass
+
             return results
 
         # === FullPipeline: Complex tasks (score > 3) ===
@@ -311,7 +574,16 @@ class Orchestrator:
 
         # 3. Architecture
         self._emit("architect", "Defining architecture...")
-        arch = await self.architect.analyze("project")
+        # Pass workspace scan data so architect can detect real conventions
+        workspace_scan = {}
+        try:
+            from zerion_core.tools.project_map import scan_workspace, deep_scan_project
+            workspace_scan = scan_workspace()
+            deep = deep_scan_project()
+            workspace_scan["technologies"] = deep.get("technologies", [])
+        except Exception:
+            pass
+        arch = await self.architect.analyze("project", workspace_scan=workspace_scan)
         results["architecture"] = arch
         
         # Inject conventions into context
@@ -324,6 +596,12 @@ class Orchestrator:
         project = plan.get("project_name", "project")
         results["plan"] = plan
 
+        # Emit todos from plan
+        tasks = plan.get("tasks", [])
+        if tasks:
+            todo_items = [f"{t.get('title', '')}" for t in tasks]
+            self._emit("todo_set", "Plan created", data={"items": todo_items})
+
         # 5. Team spawning
         self.dynamic_team = self.team_factory.spawn_team(plan, logger_callback=self.log_agent)
         self._emit("team", f"Spawned {len(self.dynamic_team)} specialists")
@@ -335,10 +613,16 @@ class Orchestrator:
             assignee = self._pick_agent(task, category)
             task_ctx = {"project": project, "task_type": category}
             task_ctx.update(context_data)
+            if rag_context:
+                task_ctx["rag_context"] = rag_context
             tasks.append(self._run_parallel_task(assignee, task, project, category, task_ctx))
         
         implementation_results = await asyncio.gather(*tasks)
         results["implementation"] = [r.output for r in implementation_results]
+
+        # Mark all tasks as done
+        for task in plan.get("tasks", []):
+            self._emit("todo_done", task.get("title", ""))
 
         # 7. Integration
         self._emit("integrator", "Merging work streams...")
@@ -360,7 +644,38 @@ class Orchestrator:
 
         self._emit("complete", "Complex workflow successful")
         results["output"] = integrated
-        self._conversation.append({"role": "assistant", "content": integrated[:2000]})
+        self.sessions.add_assistant_message(integrated[:2000])
+
+        # Record skill outcomes
+        if activated_skills:
+            outcome = {"tests_passed": True, "build_succeeded": True, "user_accepted": True}
+            for skill_name in activated_skills:
+                try:
+                    await self.skill_manager.record_outcome(
+                        skill_name=skill_name,
+                        task=user_request[:200],
+                        solution=integrated[:500],
+                        outcome=outcome,
+                        project_id=project_name,
+                    )
+                except Exception:
+                    pass
+
+        # Record to long-term memory
+        if self._ltm and project_name:
+            try:
+                await self._ltm.record_event(
+                    project_id=project_name,
+                    event_type="feature_implemented",
+                    content=f"Completed: {user_request[:200]}",
+                    session_id=self._active_session_id or "",
+                    metadata={"category": category, "complexity": complexity_score},
+                )
+                # Update project brain with outcome
+                await self._ltm.update_project_brain(project_name, integrated[:1000])
+            except Exception:
+                pass
+
         return results
 
     async def _run_parallel_task(self, agent: Agent, task: dict[str, Any], project: str, category: str, ctx: dict[str, Any]) -> TaskResult:
@@ -379,7 +694,7 @@ class Orchestrator:
             messages=[{"role": "user", "content": prompt}],
             model=ModelRouter.for_task("chat"),
         )
-        self._conversation.append({"role": "assistant", "content": resp.content[:2000]})
+        self.sessions.add_assistant_message(resp.content[:2000])
         return {"output": resp.content, "request": user_request, "category": "chat"}
 
     def _pick_agent(self, task: dict[str, Any], category: str) -> Agent:

@@ -19,11 +19,8 @@ env/
 ENV/
 
 # Zerion memory & runtime
-.memory/
-.memory/chroma/
-.agent_bus/
-.agent_bus/inbox/
-.agent_bus/outbox/
+.zerion/
+.zerion/chroma/
 
 # Environment & secrets
 .env

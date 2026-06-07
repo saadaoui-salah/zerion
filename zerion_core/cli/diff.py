@@ -9,6 +9,146 @@ from rich.text import Text
 from zerion_core.config import settings
 
 
+def _detect_language(path: str) -> str:
+    """Detect language from file extension for Pygments."""
+    ext = Path(path).suffix.lower()
+    lang_map = {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".jsx": "jsx",
+        ".tsx": "tsx",
+        ".html": "html",
+        ".css": "css",
+        ".json": "json",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".md": "markdown",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".c": "c",
+        ".cpp": "cpp",
+        ".h": "c",
+        ".hpp": "cpp",
+        ".rb": "ruby",
+        ".php": "php",
+        ".sql": "sql",
+        ".sh": "bash",
+        ".bash": "bash",
+        ".zsh": "shell",
+        ".fish": "shell",
+        ".ps1": "powershell",
+        ".bat": "batch",
+        ".cmd": "batch",
+        ".xml": "xml",
+        ".toml": "toml",
+        ".ini": "ini",
+        ".cfg": "ini",
+        ".conf": "ini",
+        ".dockerfile": "dockerfile",
+        ".makefile": "makefile",
+        ".cmake": "cmake",
+        ".vue": "vue",
+        ".svelte": "svelte",
+    }
+    return lang_map.get(ext, "text")
+
+
+def _highlight_code(code: str, language: str) -> list[tuple[str, str]]:
+    """Highlight code and return list of (token, style) pairs.
+
+    Falls back to plain text if Pygments not available.
+    """
+    try:
+        from pygments import highlight
+        from pygments.lexers import get_lexer_by_name, TextLexer
+        from pygments.token import Token
+
+        try:
+            lexer = get_lexer_by_name(language)
+        except Exception:
+            lexer = TextLexer()
+
+        # Token style map (Monokai-inspired for dark backgrounds)
+        token_styles = {
+            Token.Keyword: "bold #c678dd",
+            Token.Keyword.Namespace: "bold #c678dd",
+            Token.Keyword.Declaration: "bold #c678dd",
+            Token.Keyword.Type: "bold #e5c07b",
+            Token.Name.Function: "bold #61afef",
+            Token.Name.Class: "bold #e5c07b",
+            Token.Name.Decorator: "bold #d19a66",
+            Token.Name.Builtin: "bold #56b6c2",
+            Token.Name.Builtin.Pseudo: "bold #56b6c2",
+            Token.Name.Constant: "bold #d19a66",
+            Token.Name.Variable: "#e06c75",
+            Token.Name.Attribute: "#d19a66",
+            Token.Name.Tag: "bold #e06c75",
+            Token.Name.Entity: "bold #e06c75",
+            Token.String: "bold #98c379",
+            Token.String.Affix: "bold #c678dd",
+            Token.String.Backtick: "bold #98c379",
+            Token.String.Char: "bold #98c379",
+            Token.String.Double: "bold #98c379",
+            Token.String.Single: "bold #98c379",
+            Token.String.Regex: "bold #98c379",
+            Token.Number: "bold #d19a66",
+            Token.Number.Bin: "bold #d19a66",
+            Token.Number.Float: "bold #d19a66",
+            Token.Number.Hex: "bold #d19a66",
+            Token.Number.Integer: "bold #d19a66",
+            Token.Number.Oct: "bold #d19a66",
+            Token.Operator: "#56b6c2",
+            Token.Operator.Word: "bold #c678dd",
+            Token.Punctuation: "#abb2bf",
+            Token.Comment: "italic #5c6370",
+            Token.Comment.Hashbang: "italic #5c6370",
+            Token.Comment.Multiline: "italic #5c6370",
+            Token.Generic.Heading: "bold #e5c07b",
+            Token.Generic.Subheading: "bold #e5c07b",
+            Token.Generic.Deleted: "#e06c75",
+            Token.Generic.Inserted: "#98c379",
+            Token.Generic.Error: "bold #f44747",
+            Token.Generic.Output: "#abb2bf",
+            Token.Generic.Prompt: "bold #61afef",
+            Token.Generic.Emph: "italic",
+            Token.Generic.Strong: "bold",
+            Token.Generic.Traceback: "bold #f44747",
+            Token.Error: "bold #f44747",
+        }
+
+        tokens = list(lexer.get_tokens(code))
+        result = []
+        for token_type, value in tokens:
+            style = token_styles.get(token_type, "#abb2bf")
+            result.append((value, style))
+        return result
+
+    except ImportError:
+        # No Pygments - return plain text
+        return [(code, "#abb2bf")]
+
+
+def _render_highlighted_line(
+    text_obj: Text,
+    code: str,
+    language: str,
+    base_style: str = "",
+) -> None:
+    """Render a syntax-highlighted line into a Text object."""
+    tokens = _highlight_code(code, language)
+    for value, style in tokens:
+        if base_style:
+            # Combine base background with token foreground
+            # Extract foreground color from token style
+            fg = style.split()[-1] if style else "#abb2bf"
+            combined = f"{fg} on {base_style}"
+            text_obj.append(value, style=combined)
+        else:
+            text_obj.append(value, style=style)
+
+
 def unified_diff(old: str | None, new: str, path: str) -> list[str]:
     old_lines = (old or "").splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)
@@ -34,30 +174,45 @@ def diff_stats(old: str | None, new: str) -> tuple[int, int]:
     return added, removed
 
 
-def render_diff_lines(lines: list[str]) -> Text:
-    """Render unified diff with git-style green + / red - coloring."""
+def render_diff_lines(lines: list[str], path: str = "") -> Text:
+    """Render unified diff with syntax-aware highlighting and background colors."""
     text = Text()
+    language = _detect_language(path) if path else "text"
+
     for line in lines:
         if line.startswith("+++") or line.startswith("---"):
             text.append(line + "\n", style="bold white")
         elif line.startswith("@@"):
             text.append(line + "\n", style="bold cyan")
         elif line.startswith("+"):
-            text.append(line + "\n", style="bold #3fb950 on #0d1117")
+            # Added line: green background with syntax highlighting
+            code = line[1:]  # Remove the + prefix
+            text.append("+ ", style="bold #3fb950 on #0d2818")
+            _render_highlighted_line(text, code, language, base_style="#0d2818")
+            text.append("\n")
         elif line.startswith("-"):
-            text.append(line + "\n", style="bold #f85149 on #0d1117")
+            # Removed line: red background with syntax highlighting
+            code = line[1:]  # Remove the - prefix
+            text.append("- ", style="bold #f85149 on #2d1117")
+            _render_highlighted_line(text, code, language, base_style="#2d1117")
+            text.append("\n")
         else:
             text.append(line + "\n", style="#8b949e")
     return text
 
 
 def render_ndiff_preview(old: str | None, new: str, path: str, max_lines: int = 80) -> Text:
-    """Compact +/- preview for new or edited files."""
+    """Compact +/- preview for new or edited files with syntax highlighting."""
     text = Text()
+    language = _detect_language(path)
     text.append(f"📄 {path}\n", style="bold white")
+
     if old is None or old == "":
+        # New file: show all lines with green background
         for i, line in enumerate(new.splitlines()[:max_lines]):
-            text.append(f"+ {line}\n", style="bold #3fb950")
+            text.append("+ ", style="bold #3fb950 on #0d2818")
+            _render_highlighted_line(text, line, language, base_style="#0d2818")
+            text.append("\n")
         if new.count("\n") > max_lines:
             text.append(f"  … {new.count(chr(10)) - max_lines} more lines\n", style="dim")
         return text
@@ -68,9 +223,15 @@ def render_ndiff_preview(old: str | None, new: str, path: str, max_lines: int = 
         return text
     for line in lines[:max_lines]:
         if line.startswith("+"):
-            text.append(line + "\n", style="bold #3fb950 on #0d1117")
+            code = line[1:]
+            text.append("+ ", style="bold #3fb950 on #0d2818")
+            _render_highlighted_line(text, code, language, base_style="#0d2818")
+            text.append("\n")
         elif line.startswith("-"):
-            text.append(line + "\n", style="bold #f85149 on #0d1117")
+            code = line[1:]
+            text.append("- ", style="bold #f85149 on #2d1117")
+            _render_highlighted_line(text, code, language, base_style="#2d1117")
+            text.append("\n")
         elif line.startswith("@@"):
             text.append(line + "\n", style="cyan")
         elif not line.startswith(("---", "+++")):
@@ -79,12 +240,27 @@ def render_ndiff_preview(old: str | None, new: str, path: str, max_lines: int = 
 
 
 def render_side_by_side(old: str | None, new: str, path: str, context_lines: int = 3) -> Text:
-    """Render a side-by-side diff with line numbers, matching the editor-style layout."""
+    """Render a side-by-side diff with line numbers, syntax highlighting, and colored backgrounds."""
     old_lines = (old or "").splitlines()
     new_lines = new.splitlines()
+    language = _detect_language(path)
     text = Text()
 
     text.append(f"← Edit {path}\n", style="bold #4fc1ff")
+
+    # New file: show all lines as additions
+    if old is None or old == "":
+        gutter = max(3, len(str(len(new_lines))))
+        for i, line in enumerate(new_lines):
+            text.append(f" {'':>{gutter}} ", style="#6e7681")
+            text.append(f" ", style="#6e7681")
+            text.append(f" {i+1:>{gutter}} ", style="#6e7681")
+            text.append(f"+", style="bold #3fb950")
+            text.append(" ", style="bold #3fb950 on #0d2818")
+            _render_highlighted_line(text, line, language, base_style="#0d2818")
+            text.append("\n")
+        text.append("\n")
+        return text
 
     sm = difflib.SequenceMatcher(None, old_lines, new_lines)
     opcodes = sm.get_opcodes()
@@ -140,14 +316,18 @@ def render_side_by_side(old: str | None, new: str, path: str, context_lines: int
                     old_line = old_lines[i] if i < len(old_lines) else ""
                     new_line = new_lines[j] if j < len(new_lines) else ""
 
-                    # Left side: removed line
+                    # Left side: removed line (red background)
                     text.append(f" {i+1:>{gutter}} ", style="#6e7681")
                     text.append(f"-", style="bold #f85149")
-                    text.append(f" {old_line}\n", style="#f85149")
-                    # Right side: added line
+                    text.append(" ", style="bold #f85149 on #2d1117")
+                    _render_highlighted_line(text, old_line, language, base_style="#2d1117")
+                    text.append("\n")
+                    # Right side: added line (green background)
                     text.append(f" {j+1:>{gutter}} ", style="#6e7681")
                     text.append(f"+", style="bold #3fb950")
-                    text.append(f" {new_line}\n", style="#3fb950")
+                    text.append(" ", style="bold #3fb950 on #0d2818")
+                    _render_highlighted_line(text, new_line, language, base_style="#0d2818")
+                    text.append("\n")
                     i += 1
                     j += 1
 
@@ -156,7 +336,9 @@ def render_side_by_side(old: str | None, new: str, path: str, context_lines: int
                     old_line = old_lines[i] if i < len(old_lines) else ""
                     text.append(f" {i+1:>{gutter}} ", style="#6e7681")
                     text.append(f"-", style="bold #f85149")
-                    text.append(f" {old_line}\n", style="#f85149")
+                    text.append(" ", style="bold #f85149 on #2d1117")
+                    _render_highlighted_line(text, old_line, language, base_style="#2d1117")
+                    text.append("\n")
                     text.append(f" {'':>{gutter}} ", style="#6e7681")
                     text.append(f" \n", style="#6e7681")
                     i += 1
@@ -167,13 +349,17 @@ def render_side_by_side(old: str | None, new: str, path: str, context_lines: int
                     text.append(f" \n", style="#6e7681")
                     text.append(f" {j+1:>{gutter}} ", style="#6e7681")
                     text.append(f"+", style="bold #3fb950")
-                    text.append(f" {new_line}\n", style="#3fb950")
+                    text.append(" ", style="bold #3fb950 on #0d2818")
+                    _render_highlighted_line(text, new_line, language, base_style="#0d2818")
+                    text.append("\n")
                     j += 1
             else:
                 # Context line (equal)
                 line = old_lines[i] if i < len(old_lines) else ""
                 text.append(f" {i+1:>{gutter}} ", style="#6e7681")
-                text.append(f"  {line}\n", style="#8b949e")
+                text.append(f"  ", style="#6e7681")
+                _render_highlighted_line(text, line, language)
+                text.append("\n")
                 i += 1
                 j += 1
 

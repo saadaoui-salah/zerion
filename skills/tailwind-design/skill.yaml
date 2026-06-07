@@ -1,0 +1,95 @@
+name: tailwind-design
+version: 1.0.0
+description: "Expert Tailwind CSS design assistant with shadcn-like component patterns for Django, React, and Next.js"
+author: "zerion-core"
+tags:
+  - tailwind
+  - css
+  - design
+  - ui
+  - components
+  - shadcn
+  - django
+  - react
+  - nextjs
+  - frontend
+  - responsive
+  - accessibility
+
+triggers:
+  patterns:
+    - "tailwind"
+    - "tailwindcss"
+    - "shadcn"
+    - "design system"
+    - "ui component"
+    - "css class"
+    - "responsive design"
+    - "dark mode"
+    - "theme"
+    - "layout"
+    - "flexbox"
+    - "grid"
+    - "spacing"
+    - "colors"
+    - "typography"
+    - "button"
+    - "card"
+    - "modal"
+    - "form"
+    - "input"
+    - "select"
+    - "checkbox"
+    - "radio"
+    - "switch"
+    - "tabs"
+    - "accordion"
+    - "dialog"
+    - "dropdown"
+    - "menu"
+    - "navigation"
+    - "sidebar"
+    - "header"
+    - "footer"
+    - "hero"
+    - "testimonial"
+    - "pricing"
+    - "faq"
+  file_patterns:
+    - "*.css"
+    - "*.scss"
+    - "*.tsx"
+    - "*.jsx"
+    - "*.vue"
+    - "*.svelte"
+    - "tailwind.config.*"
+    - "postcss.config.*"
+  languages:
+    - css
+    - typescript
+    - javascript
+    - python
+    - html
+
+activation:
+  auto: true
+  priority: 70
+  require_all: false
+
+settings:
+  frameworks:
+    - django
+    - react
+    - nextjs
+    - vue
+    - svelte
+  themes:
+    - light
+    - dark
+    - system
+  responsive_breakpoints:
+    sm: "640px"
+    md: "768px"
+    lg: "1024px"
+    xl: "1280px"
+    "2xl": "1536px"

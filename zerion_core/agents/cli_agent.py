@@ -5,7 +5,7 @@ import json
 import re
 import subprocess
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from zerion_core.agents.base import Agent, AgentStatus, TaskResult
@@ -59,6 +59,28 @@ BLOCKED_PATTERNS = [
 
 MAX_CMD_RETRIES = 2
 
+# Windows reserved device names that cannot be used as file/directory names
+_WINDOWS_RESERVED = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
+# Characters forbidden in Windows file paths (beyond what the filesystem enforces)
+_WINDOWS_INVALID_CHARS = frozenset('<>:"|?*')
+
+
+class PathValidationError:
+    """Result of a path type validation check."""
+
+    def __init__(self, ok: bool, message: str = "", severity: str = "error") -> None:
+        self.ok = ok
+        self.message = message
+        self.severity = severity  # "error" (blocks), "warning" (log only)
+
+    def __bool__(self) -> bool:
+        return self.ok
+
 
 class CLIAgent(Agent):
     """Executes shell commands and writes files with structure awareness and auto-fix."""
@@ -89,14 +111,115 @@ class CLIAgent(Agent):
         self.memory.working.set("project_structure", text)
         return text
 
+    def _validate_path(self, rel_path: str, expect_file: bool = True) -> PathValidationError:
+        """Validate a path for type collisions, reserved names, and Windows-specific issues.
+
+        Args:
+            rel_path: Relative path from workspace root.
+            expect_file: True if the target should be a file, False for directory.
+
+        Returns:
+            PathValidationError with ok=True if valid, or ok=False with a message describing the issue.
+        """
+        target = (self.workspace / rel_path).resolve()
+
+        # 1. Workspace boundary check
+        if not str(target).startswith(str(self.workspace)):
+            return PathValidationError(False, f"Blocked path outside workspace: {rel_path}")
+
+        # 2. Windows reserved device names
+        name = target.name
+        name_stem = target.stem.upper() if "." in target.name else target.name.upper()
+        if is_windows() and (name_stem in _WINDOWS_RESERVED or name.upper() in _WINDOWS_RESERVED):
+            return PathValidationError(False, f"Reserved Windows device name: {name}")
+
+        # 3. Invalid characters (Windows-only strict check)
+        if is_windows():
+            bad_chars = set(name) & _WINDOWS_INVALID_CHARS
+            if bad_chars:
+                return PathValidationError(False, f"Invalid characters in filename {name}: {''.join(bad_chars)}")
+
+        # 4. Trailing dots/spaces (Windows silently strips these, causing confusion)
+        if is_windows() and (name.endswith(".") or name.endswith(" ")):
+            return PathValidationError(False, f"Filename ends with a dot or space (Windows will strip it): {name}")
+
+        # 5. File/dir collision: target is a directory but we want to write a file
+        if expect_file and target.exists() and target.is_dir():
+            return PathValidationError(
+                False,
+                f"Path collision: {rel_path} is a directory, cannot create a file there"
+            )
+
+        # 6. File/dir collision: target is a file but we want to create a directory
+        if not expect_file and target.exists() and target.is_file():
+            return PathValidationError(
+                False,
+                f"Path collision: {rel_path} is a file, cannot create a directory there"
+            )
+
+        # 7. Parent is a file (cannot create child)
+        if target.parent.exists() and target.parent.is_file():
+            return PathValidationError(
+                False,
+                f"Path collision: parent {target.parent.relative_to(self.workspace)} is a file, "
+                f"cannot create {name} inside it"
+            )
+
+        # 8. Case-insensitive collision on Windows: another file/dir with different case exists
+        if is_windows() and target.parent.exists():
+            try:
+                siblings = [entry.name for entry in target.parent.iterdir()]
+                target_lower = name.lower()
+                for sibling in siblings:
+                    if sibling.lower() == target_lower and sibling != name:
+                        return PathValidationError(
+                            False,
+                            f"Case collision on Windows: '{sibling}' already exists, "
+                            f"cannot create '{name}' (same path, different case)"
+                        )
+            except PermissionError:
+                pass  # Cannot list directory, skip this check
+
+        # 9. Extension mismatch warning: writing .py but path says .txt
+        if expect_file:
+            ext = target.suffix.lower()
+            content_clues = {
+                ".py": ("python", "script"),
+                ".js": ("javascript", "node"),
+                ".ts": ("typescript", "react"),
+                ".tsx": ("tsx", "react"),
+                ".jsx": ("jsx", "react"),
+                ".json": ("json", "config"),
+                ".md": ("markdown", "readme"),
+            }
+            # This is advisory only — don't block, just note it
+            # (actual content validation would require reading the file first)
+
+        return PathValidationError(True)
+
+    def _validate_path_batch(self, paths: list[str], expect_file: bool = True) -> dict[str, PathValidationError]:
+        """Validate multiple paths at once, returning a dict of path -> result."""
+        results = {}
+        for p in paths:
+            results[p] = self._validate_path(p, expect_file=expect_file)
+        return results
+
     async def execute(self, task: str, context: dict[str, Any] | None = None) -> TaskResult:
         self.state.status = AgentStatus.WORKING
         self.state.current_task = task
         ctx = context or {}
         self._emit("cli_task", message=task, project=ctx.get("project", ""))
+        self._emit("todo_add", message=task)
 
         project_tree = self._refresh_structure()
         memory_ctx = await self.memory.retrieve_context(task, project=ctx.get("project", ""))
+
+        # Use RAG context if available, otherwise fall back to full project tree
+        rag_ctx = ctx.get("rag_context", "")
+        if rag_ctx:
+            project_context = rag_ctx
+        else:
+            project_context = f"{project_tree}\n\n{memory_ctx}"
 
         try:
             resp = await self.llm.chat(
@@ -107,8 +230,8 @@ class CLIAgent(Agent):
                             f"Task: {task}\n"
                             f"Workspace: {self.workspace}\n"
                             f"OS: {'windows' if is_windows() else 'posix'}\n"
-                            f"Context: {json.dumps(ctx)}\n\n"
-                            f"{project_tree}\n\n{memory_ctx}"
+                            f"Context: {json.dumps({k: v for k, v in ctx.items() if k != 'rag_context'})}\n\n"
+                            f"{project_context}"
                         ),
                     }
                 ],
@@ -130,12 +253,11 @@ class CLIAgent(Agent):
             if not path:
                 continue
             
-            # STRICT PATH VALIDATION: Check for file/dir collision
-            target_path = (self.workspace / path).resolve()
-            if target_path.parent.exists() and target_path.parent.is_file():
-                err = f"Path collision: Parent path {target_path.parent} is a file, cannot create {path}"
-                errors.append(err)
-                self._emit("file_error", message=err, path=path)
+            # PATH TYPE VALIDATION: Comprehensive collision/reserved-name check
+            path_check = self._validate_path(path, expect_file=True)
+            if not path_check.ok:
+                self._emit("file_error", message=path_check.message, path=path)
+                errors.append(path_check.message)
                 continue
 
             ok, msg, diff_info = self._write_file(path, content)
@@ -165,6 +287,14 @@ class CLIAgent(Agent):
             new_str = spec.get("new", "")
             if not path or not old_str:
                 continue
+
+            # PATH TYPE VALIDATION: Ensure path is a valid file location
+            path_check = self._validate_path(path, expect_file=True)
+            if not path_check.ok:
+                self._emit("file_error", message=path_check.message, path=path)
+                errors.append(path_check.message)
+                continue
+
             ok, msg, diff_info = self._edit_file(path, old_str, new_str)
             if ok:
                 results.append(msg)
@@ -250,6 +380,11 @@ class CLIAgent(Agent):
             if not str(target).startswith(str(self.workspace)):
                 return False, f"Blocked path outside workspace: {rel_path}", {}
 
+            # Defense-in-depth: validate even if caller already checked
+            path_check = self._validate_path(rel_path, expect_file=True)
+            if not path_check.ok:
+                return False, path_check.message, {}
+
             if not target.exists():
                 return False, f"File not found: {rel_path}", {}
 
@@ -331,6 +466,11 @@ class CLIAgent(Agent):
             target = (self.workspace / rel_path).resolve()
             if not str(target).startswith(str(self.workspace)):
                 return False, f"Blocked path outside workspace: {rel_path}", {}
+
+            # Defense-in-depth: validate even if caller already checked
+            path_check = self._validate_path(rel_path, expect_file=True)
+            if not path_check.ok:
+                return False, path_check.message, {}
 
             old_content: str | None = None
             edited = target.exists()

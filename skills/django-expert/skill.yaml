@@ -1,0 +1,111 @@
+name: django-expert
+version: 1.0.0
+description: Expert Django development assistant - project setup, apps, models, views, templates, migrations, and best practices
+author: zerion-core
+tags:
+  - django
+  - python
+  - web
+  - backend
+  - orm
+  - rest
+  - api
+  - templates
+  - migrations
+
+triggers:
+  keywords:
+    - django
+    - djangoproject
+    - manage.py
+    - settings.py
+    - views.py
+    - models.py
+    - urls.py
+    - templates
+    - migrations
+    - makemigrations
+    - migrate
+    - createsuperuser
+    - collectstatic
+    - requirements
+    - venv
+    - virtualenv
+    - installed_apps
+    - restframework
+    - celery
+    - redis
+    - postgresql
+    - sqlite
+  file_patterns:
+    - "settings.py"
+    - "urls.py"
+    - "views.py"
+    - "models.py"
+    - "forms.py"
+    - "admin.py"
+    - "serializers.py"
+    - "tasks.py"
+    - "manage.py"
+    - "wsgi.py"
+    - "asgi.py"
+    - "requirements*.txt"
+    - "*.html"
+  description_patterns:
+    - "django"
+    - "web app"
+    - "api"
+    - "rest"
+    - "backend"
+
+priority: 90
+dependencies:
+  - python-expert
+
+tools:
+  required:
+    - read_file
+    - write_file
+    - edit_file
+    - grep
+    - bash
+  optional:
+    - glob
+    - list_dir
+  denied: []
+
+permissions:
+  - read_file
+  - write_file
+  - edit_file
+  - grep
+  - bash
+
+memory:
+  enabled: true
+  max_entries: 1000
+
+rag:
+  enabled: true
+  docs_path: docs/
+  chunk_size: 512
+  top_k: 5
+
+workflow:
+  name: Django Development Workflow
+  steps:
+    - inspect_structure
+    - setup_environment
+    - configure_settings
+    - create_apps
+    - define_models
+    - create_views
+    - setup_urls
+    - create_templates
+    - run_migrations
+    - test
+  auto_follow: true
+
+auto_activate: true
+project_aware: true
+min_score: 0.6
